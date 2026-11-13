@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cryptopp-rvv C)
+project(cryptopp-rvv C CXX)
 enable_testing()
 
 # ---------------------------------------------------------------------------
