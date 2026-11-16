@@ -77,7 +77,7 @@ class CRYPTOPP_DLL Rijndael : public Rijndael_Info, public BlockCipherDocumentat
 	{
 	public:
 		void ProcessAndXorBlock(const byte *inBlock, const byte *xorBlock, byte *outBlock) const;
-#if CRYPTOPP_RIJNDAEL_ADVANCED_PROCESS_BLOCKS
+#if CRYPTOPP_RIJNDAEL_ADVANCED_PROCESS_BLOCKS || defined(CRYPTOPP_RVV_AES)
 		size_t AdvancedProcessBlocks(const byte *inBlocks, const byte *xorBlocks, byte *outBlocks, size_t length, word32 flags) const;
 #endif
 	};

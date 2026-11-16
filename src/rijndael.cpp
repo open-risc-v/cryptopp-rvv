@@ -85,6 +85,9 @@ being unloaded from L1 cache, until that round is finished.
 #ifndef CRYPTOPP_GENERATE_X64_MASM
 
 #include "rijndael.h"
+#if defined(CRYPTOPP_RVV_AES)
+#include "rijndael_rvv.h"
+#endif
 #include "misc.h"
 #include "cpu.h"
 
@@ -528,6 +531,7 @@ void Rijndael::Base::UncheckedSetKey(const byte *userKey, unsigned int keyLen, c
 #endif
 }
 
+#if !defined(CRYPTOPP_RVV_AES)
 void Rijndael::Enc::ProcessAndXorBlock(const byte *inBlock, const byte *xorBlock, byte *outBlock) const
 {
 #if CRYPTOPP_SSE2_ASM_AVAILABLE || defined(CRYPTOPP_X64_MASM_AVAILABLE) || CRYPTOPP_AESNI_AVAILABLE
@@ -633,6 +637,7 @@ void Rijndael::Enc::ProcessAndXorBlock(const byte *inBlock, const byte *xorBlock
 
 	Block::Put(xorBlock, outBlock)(tbw[0]^rk[0])(tbw[1]^rk[1])(tbw[2]^rk[2])(tbw[3]^rk[3]);
 }
+#endif
 
 void Rijndael::Dec::ProcessAndXorBlock(const byte *inBlock, const byte *xorBlock, byte *outBlock) const
 {
@@ -1240,6 +1245,7 @@ void Rijndael_Enc_AdvancedProcessBlocks_SSE2(void *locals, const word32 *k);
 #endif
 
 #if CRYPTOPP_RIJNDAEL_ADVANCED_PROCESS_BLOCKS
+#if !defined(CRYPTOPP_RVV_AES)
 size_t Rijndael::Enc::AdvancedProcessBlocks(const byte *inBlocks, const byte *xorBlocks, byte *outBlocks, size_t length, word32 flags) const
 {
 #if CRYPTOPP_AESNI_AVAILABLE
@@ -1307,6 +1313,7 @@ size_t Rijndael::Enc::AdvancedProcessBlocks(const byte *inBlocks, const byte *xo
 
 	return BlockTransformation::AdvancedProcessBlocks(inBlocks, xorBlocks, outBlocks, length, flags);
 }
+#endif
 
 size_t Rijndael::Dec::AdvancedProcessBlocks(const byte *inBlocks, const byte *xorBlocks, byte *outBlocks, size_t length, word32 flags) const
 {
@@ -1326,6 +1333,75 @@ size_t Rijndael::Dec::AdvancedProcessBlocks(const byte *inBlocks, const byte *xo
 	return BlockTransformation::AdvancedProcessBlocks(inBlocks, xorBlocks, outBlocks, length, flags);
 }
 #endif	// CRYPTOPP_RIJNDAEL_ADVANCED_PROCESS_BLOCKS
+
+#if defined(CRYPTOPP_RVV_AES)
+/* ---------- Zvkned 内核（RVV）----------
+ * 单块：一条 vaesem/vaesef 代一整轮 SubBytes+ShiftRows+MixColumns。
+ * 多块：接管 CTR（BT_InBlockIsCounter），15 个轮密钥常驻寄存器，省掉每块 14 次装载。 */
+void Rijndael::Enc::ProcessAndXorBlock(const byte *inBlock, const byte *xorBlock, byte *outBlock) const
+{
+	__asm__ volatile("vsetivli zero, 4, e32, m1" ::: "memory");
+	const uint32_t *rk = (const uint32_t *)m_key.begin();
+	vuint32m1_t s = __riscv_vle32_v_u32m1((const uint32_t *)inBlock, 4);
+	s = __riscv_vxor_vv_u32m1(s, RvvLdKeyEdge(rk), 4);
+	for (unsigned int r = 1; r < m_rounds; r++) {
+		vuint32m1_t k = RvvLdKeyMid(rk + 4 * r);
+		__asm__ volatile("vaesem.vv %0, %1" : "+vr"(s) : "vr"(k));
+	}
+	{
+		vuint32m1_t k = RvvLdKeyEdge(rk + 4 * m_rounds);
+		__asm__ volatile("vaesef.vv %0, %1" : "+vr"(s) : "vr"(k));
+	}
+	if (xorBlock) {
+		vuint32m1_t p = __riscv_vle32_v_u32m1((const uint32_t *)xorBlock, 4);
+		s = __riscv_vxor_vv_u32m1(s, p, 4);
+	}
+	__riscv_vse32_v_u32m1((uint32_t *)outBlock, s, 4);
+}
+
+size_t Rijndael::Enc::AdvancedProcessBlocks(const byte *inBlocks, const byte *xorBlocks,
+                                            byte *outBlocks, size_t length, word32 flags) const
+{
+	const size_t bs = BlockSize();
+	/* 只接管 AES-256 的纯 CTR；CBC/XTS/反向等回落基类逐块实现 */
+	if (m_rounds != 14 || (length % bs) != 0
+	    || (flags & (BT_DontIncrementInOutPointers | BT_ReverseDirection | BT_XorInput))
+	    || !(flags & BT_InBlockIsCounter))
+		return BlockTransformation::AdvancedProcessBlocks(inBlocks, xorBlocks, outBlocks, length, flags);
+
+	const uint32_t *rk = (const uint32_t *)m_key.begin();
+	vuint32m1_t k0  = RvvLdKeyEdge(rk + 0), k1  = RvvLdKeyMid(rk + 4);
+	vuint32m1_t k2  = RvvLdKeyMid(rk + 8),  k3  = RvvLdKeyMid(rk + 12);
+	vuint32m1_t k4  = RvvLdKeyMid(rk + 16), k5  = RvvLdKeyMid(rk + 20);
+	vuint32m1_t k6  = RvvLdKeyMid(rk + 24), k7  = RvvLdKeyMid(rk + 28);
+	vuint32m1_t k8  = RvvLdKeyMid(rk + 32), k9  = RvvLdKeyMid(rk + 36);
+	vuint32m1_t k10 = RvvLdKeyMid(rk + 40), k11 = RvvLdKeyMid(rk + 44);
+	vuint32m1_t k12 = RvvLdKeyMid(rk + 48), k13 = RvvLdKeyMid(rk + 52);
+	vuint32m1_t k14 = RvvLdKeyEdge(rk + 56);
+
+	__asm__ volatile("vsetivli zero, 4, e32, m1" ::: "memory");
+	byte *ctr = const_cast<byte *>(inBlocks);
+	size_t n = length / bs;
+
+#define RVV_AES_M(i) __asm__ volatile("vaesem.vv %0, %1" : "+vr"(s) : "vr"(k##i));
+	for (size_t i = 0; i < n; i++) {
+		vuint32m1_t s = __riscv_vle32_v_u32m1((const uint32_t *)ctr, 4);
+		s = __riscv_vxor_vv_u32m1(s, k0, 4);
+		RVV_AES_M(1) RVV_AES_M(2) RVV_AES_M(3) RVV_AES_M(4) RVV_AES_M(5)
+		RVV_AES_M(6) RVV_AES_M(7) RVV_AES_M(8) RVV_AES_M(9) RVV_AES_M(10)
+		RVV_AES_M(11) RVV_AES_M(12) RVV_AES_M(13)
+		__asm__ volatile("vaesef.vv %0, %1" : "+vr"(s) : "vr"(k14));
+		if (xorBlocks) {
+			vuint32m1_t p = __riscv_vle32_v_u32m1((const uint32_t *)(xorBlocks + bs * i), 4);
+			s = __riscv_vxor_vv_u32m1(s, p, 4);
+		}
+		__riscv_vse32_v_u32m1((uint32_t *)(outBlocks + bs * i), s, 4);
+		ctr[bs - 1]++;
+	}
+#undef RVV_AES_M
+	return 0;
+}
+#endif
 
 NAMESPACE_END
 
