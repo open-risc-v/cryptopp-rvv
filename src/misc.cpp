@@ -1,6 +1,10 @@
 // misc.cpp - originally written and placed in the public domain by Wei Dai
 
 #include "pch.h"
+
+#if defined(RVV_KERNELS) && defined(__riscv_v)
+#include "riscv/xor_rvv.h"
+#endif
 #include "config.h"
 
 #if CRYPTOPP_MSC_VERSION
@@ -69,6 +73,9 @@ size_t BytePtrSize(const SecByteBlock& str)
 // xorbuf simplified at https://github.com/weidai11/cryptopp/issues/1020
 void xorbuf(byte *buf, const byte *mask, size_t count)
 {
+#if defined(RVV_KERNELS) && defined(__riscv_v)
+	if (count >= 64) { rvv_xor_inplace(buf, mask, count); return; }
+#endif
 	CRYPTOPP_ASSERT(buf != NULLPTR);
 	CRYPTOPP_ASSERT(mask != NULLPTR);
 	CRYPTOPP_ASSERT(count > 0);
@@ -143,6 +150,9 @@ void xorbuf(byte *buf, const byte *mask, size_t count)
 // xorbuf simplified at https://github.com/weidai11/cryptopp/issues/1020
 void xorbuf(byte *output, const byte *input, const byte *mask, size_t count)
 {
+#if defined(RVV_KERNELS) && defined(__riscv_v)
+	if (count >= 64) { rvv_xor_out(output, input, mask, count); return; }
+#endif
 	CRYPTOPP_ASSERT(output != NULLPTR);
 	CRYPTOPP_ASSERT(input != NULLPTR);
 	CRYPTOPP_ASSERT(count > 0);
